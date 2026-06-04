@@ -1,14 +1,20 @@
 // src/pages/Dashboard.jsx
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Award, Users, Star, BarChart2, ShieldAlert, CheckCircle } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import { useAppContext } from '../context/AppContext';
 
 export default function Dashboard() {
-  const { players, teams, matches, tournaments } = useAppContext();
+  const { players, teams, matches, tournaments, refreshData } = useAppContext();
+
+  useEffect(() => {
+    if (refreshData) {
+      refreshData();
+    }
+  }, []);
 
   // Find active ongoing tournament
-  const activeTournament = tournaments.find(t => t.status === 'ACTIVE');
+  const activeTournament = tournaments.find(t => t.status === 'ACTIVE') || tournaments.find(t => t.status === 'UPCOMING') || tournaments[0] || null;
 
   let totalScoreA = 0;
   let totalScoreB = 0;

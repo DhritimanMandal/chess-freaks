@@ -123,12 +123,15 @@ export const AppProvider = ({ children }) => {
                 fetch('/api/teams').then(res => res.json()).then(setTeams);
               }
               break;
-            case 'SCOREBOARD_UPDATE':
-              // Refresh matches
+            case 'TOURNAMENT_UPDATE':
+              fetch('/api/tournaments').then(res => res.json()).then(setTournaments);
               fetch('/api/matches').then(res => res.json()).then(setMatches);
-              // Refresh teams points/wins/losses
               fetch('/api/teams').then(res => res.json()).then(setTeams);
-              // Refresh players statistics
+              fetch('/api/players').then(res => res.json()).then(setPlayers);
+              break;
+            case 'SCOREBOARD_UPDATE':
+              fetch('/api/matches').then(res => res.json()).then(setMatches);
+              fetch('/api/teams').then(res => res.json()).then(setTeams);
               fetch('/api/players').then(res => res.json()).then(setPlayers);
               break;
             default:
