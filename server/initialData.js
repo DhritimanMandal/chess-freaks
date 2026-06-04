@@ -401,10 +401,10 @@ const initialTournaments = [
   {
     id: "tour-1",
     name: "Chess Freaks Grand League 2026",
-    format: "Round Robin",
+    format: "Team VS Team",
     startDate: "2026-06-01",
     endDate: "2026-06-30",
-    teams: ["team-1", "team-2", "team-3", "team-4"],
+    teams: ["team-1", "team-2"],
     status: "ACTIVE"
   }
 ];

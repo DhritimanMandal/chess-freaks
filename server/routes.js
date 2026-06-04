@@ -266,6 +266,131 @@ router.delete('/tournaments/:id', authenticateToken, requireAdmin, async (req, r
 });
 
 // --- MATCHES ROUTES ---
+// --- HELPER FUNCTION FOR DYNAMIC TEAM STANDINGS ---
+async function recalculateTeamStandings() {
+  try {
+    const teams = await db.teams.getAll();
+    const tournaments = await db.tournaments.getAll();
+    const matches = await db.matches.getAll();
+
+    const teamStats = {};
+    teams.forEach(t => {
+      teamStats[t._id.toString()] = {
+        points: 0,
+        wins: 0,
+        losses: 0,
+        draws: 0,
+        boardPoints: 0
+      };
+    });
+
+    for (const tour of tournaments) {
+      const tourMatches = matches.filter(m => m.tournamentId.toString() === tour._id.toString());
+      const teamAId = tour.teams[0]?.toString();
+      const teamBId = tour.teams[1]?.toString();
+
+      if (!teamAId || !teamBId) continue;
+
+      // Group matches by round
+      const rounds = {};
+      tourMatches.forEach(m => {
+        if (!rounds[m.round]) rounds[m.round] = [];
+        rounds[m.round].push(m);
+      });
+
+      let tourPointsA = 0;
+      let tourPointsB = 0;
+      let tourBoardPointsA = 0;
+      let tourBoardPointsB = 0;
+
+      for (const roundNum in rounds) {
+        let roundBoardPointsA = 0;
+        let roundBoardPointsB = 0;
+        let hasGames = false;
+
+        rounds[roundNum].forEach(m => {
+          if (!m.isCompleted) return;
+
+          // Game 1
+          if (m.game1Result && m.game1Result !== 'NP') {
+            hasGames = true;
+            if (m.game1Result === 'playerA') {
+              roundBoardPointsA += 1;
+              tourBoardPointsA += 1;
+            } else if (m.game1Result === 'playerB') {
+              roundBoardPointsB += 1;
+              tourBoardPointsB += 1;
+            } else if (m.game1Result === 'draw') {
+              roundBoardPointsA += 0.5;
+              roundBoardPointsB += 0.5;
+              tourBoardPointsA += 0.5;
+              tourBoardPointsB += 0.5;
+            }
+          }
+
+          // Game 2
+          if (m.game2Result && m.game2Result !== 'NP') {
+            hasGames = true;
+            if (m.game2Result === 'playerA') {
+              roundBoardPointsA += 1;
+              tourBoardPointsA += 1;
+            } else if (m.game2Result === 'playerB') {
+              roundBoardPointsB += 1;
+              tourBoardPointsB += 1;
+            } else if (m.game2Result === 'draw') {
+              roundBoardPointsA += 0.5;
+              roundBoardPointsB += 0.5;
+              tourBoardPointsA += 0.5;
+              tourBoardPointsB += 0.5;
+            }
+          }
+        });
+
+        if (hasGames) {
+          if (roundBoardPointsA > roundBoardPointsB) {
+            tourPointsA += 1;
+          } else if (roundBoardPointsB > roundBoardPointsA) {
+            tourPointsB += 1;
+          } else {
+            tourPointsA += 0.5;
+            tourPointsB += 0.5;
+          }
+        }
+      }
+
+      const finalScoreA = tourBoardPointsA + tourPointsA;
+      const finalScoreB = tourBoardPointsB + tourPointsB;
+
+      if (teamStats[teamAId]) teamStats[teamAId].boardPoints += tourBoardPointsA;
+      if (teamStats[teamBId]) teamStats[teamBId].boardPoints += tourBoardPointsB;
+
+      if (teamStats[teamAId]) teamStats[teamAId].points += finalScoreA;
+      if (teamStats[teamBId]) teamStats[teamBId].points += finalScoreB;
+
+      if (tour.status === 'COMPLETED') {
+        if (finalScoreA > finalScoreB) {
+          if (teamStats[teamAId]) teamStats[teamAId].wins += 1;
+          if (teamStats[teamBId]) teamStats[teamBId].losses += 1;
+        } else if (finalScoreB > finalScoreA) {
+          if (teamStats[teamBId]) teamStats[teamBId].wins += 1;
+          if (teamStats[teamAId]) teamStats[teamAId].losses += 1;
+        } else {
+          if (teamStats[teamAId]) teamStats[teamAId].draws += 1;
+          if (teamStats[teamBId]) teamStats[teamBId].draws += 1;
+        }
+      }
+    }
+
+    for (const teamId in teamStats) {
+      const stats = teamStats[teamId];
+      await db.teams.update(teamId, stats);
+    }
+  } catch (err) {
+    console.error("Error in recalculateTeamStandings:", err);
+  }
+}
+
+// --- MATCHES ROUTES ---
 router.get('/matches', async (req, res) => {
   try {
     const list = await db.matches.getAll();
@@ -277,34 +402,40 @@ router.get('/matches', async (req, res) => {
 
 router.post('/matches', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const { tournamentId, teamAId, teamBId, date, round, stage } = req.body;
-    if (!tournamentId || !teamAId || !teamBId) {
-      return res.status(400).json({ error: "tournamentId, teamAId, and teamBId are required" });
+    const { tournamentId, round, matchNumber, playerAId, playerBId, timeControl, variant, matchLink, date } = req.body;
+    if (!tournamentId || !playerAId || !playerBId || !round) {
+      return res.status(400).json({ error: "tournamentId, round, playerAId, and playerBId are required" });
     }
 
     const tournament = await db.tournaments.getById(tournamentId);
     if (!tournament) return res.status(404).json({ error: "Tournament not found" });
 
-    // Validate that teams belong to tournament
-    const hasTeamA = tournament.teams.some(id => id.toString() === teamAId.toString());
-    const hasTeamB = tournament.teams.some(id => id.toString() === teamBId.toString());
-    if (!hasTeamA || !hasTeamB) {
-      return res.status(400).json({ error: "Both teams must participate in this tournament" });
+    const teamAId = tournament.teams[0];
+    const teamBId = tournament.teams[1];
+
+    if (!teamAId || !teamBId) {
+      return res.status(400).json({ error: "Tournament must have at least 2 teams assigned" });
     }
 
-    // Create the match document with empty boards
-    const matchDocs = await db.matches.createMany([{
+    const newMatch = await db.matches.create({
       tournamentId,
       teamAId,
       teamBId,
-      round: Number(round) || 1,
-      stage: stage || `Match`,
+      round: Number(round),
+      matchNumber: Number(matchNumber) || 1,
+      playerAId,
+      playerBId,
+      timeControl: timeControl || '10+6',
+      variant: variant || 'Standard',
+      matchLink: matchLink || '',
+      game1Result: null,
+      game2Result: null,
+      isCompleted: false,
+      eloProcessed: false,
       date: date || new Date().toISOString().split('T')[0]
-    }]);
+    });
 
-    const newMatch = matchDocs[0];
-    
-    // Broadcast updates
+    await recalculateTeamStandings();
     const allTeams = await db.teams.getAll();
     socket.broadcast("SCOREBOARD_UPDATE", {
       match: newMatch,
@@ -317,16 +448,107 @@ router.post('/matches', authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
-router.put('/matches/:id/boards', authenticateToken, requireAdmin, async (req, res) => {
+router.put('/matches/:id', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const { boardNumber, playerAId, playerBId, result } = req.body;
-    
-    if (!boardNumber || !playerAId || !playerBId) {
-      return res.status(400).json({ error: "boardNumber, playerAId, and playerBId are required" });
+    const {
+      playerAId,
+      playerBId,
+      timeControl,
+      variant,
+      matchLink,
+      game1Result,
+      game2Result,
+      isCompleted,
+      mvpPlayerId,
+      round,
+      matchNumber,
+      date
+    } = req.body;
+
+    const match = await db.matches.getById(req.params.id);
+    if (!match) return res.status(404).json({ error: "Match not found" });
+
+    const updates = {};
+    if (playerAId !== undefined) updates.playerAId = playerAId;
+    if (playerBId !== undefined) updates.playerBId = playerBId;
+    if (timeControl !== undefined) updates.timeControl = timeControl;
+    if (variant !== undefined) updates.variant = variant;
+    if (matchLink !== undefined) updates.matchLink = matchLink;
+    if (game1Result !== undefined) updates.game1Result = game1Result;
+    if (game2Result !== undefined) updates.game2Result = game2Result;
+    if (isCompleted !== undefined) updates.isCompleted = isCompleted;
+    if (mvpPlayerId !== undefined) updates.mvpPlayerId = mvpPlayerId;
+    if (round !== undefined) updates.round = Number(round);
+    if (matchNumber !== undefined) updates.matchNumber = Number(matchNumber);
+    if (date !== undefined) updates.date = date;
+
+    // Process Elo calculations
+    if (isCompleted && !match.eloProcessed) {
+      const K = 32;
+      const pA = await db.players.getById(playerAId || match.playerAId);
+      const pB = await db.players.getById(playerBId || match.playerBId);
+
+      if (pA && pB) {
+        let eloA = pA.elo;
+        let eloB = pB.elo;
+
+        let winsA = 0, lossesA = 0, drawsA = 0;
+        let winsB = 0, lossesB = 0, drawsB = 0;
+
+        const g1 = game1Result !== undefined ? game1Result : match.game1Result;
+        if (g1 && g1 !== 'NP') {
+          const E_A = 1 / (1 + Math.pow(10, (eloB - eloA) / 400));
+          const E_B = 1 / (1 + Math.pow(10, (eloA - eloB) / 400));
+
+          let S_A = 0.5, S_B = 0.5;
+          if (g1 === 'playerA') { S_A = 1; S_B = 0; winsA++; lossesB++; }
+          else if (g1 === 'playerB') { S_A = 0; S_B = 1; lossesA++; winsB++; }
+          else if (g1 === 'draw') { drawsA++; drawsB++; }
+
+          eloA = Math.round(eloA + K * (S_A - E_A));
+          eloB = Math.round(eloB + K * (S_B - E_B));
+        }
+
+        const g2 = game2Result !== undefined ? game2Result : match.game2Result;
+        if (g2 && g2 !== 'NP') {
+          const E_A = 1 / (1 + Math.pow(10, (eloB - eloA) / 400));
+          const E_B = 1 / (1 + Math.pow(10, (eloA - eloB) / 400));
+
+          let S_A = 0.5, S_B = 0.5;
+          if (g2 === 'playerA') { S_A = 1; S_B = 0; winsA++; lossesB++; }
+          else if (g2 === 'playerB') { S_A = 0; S_B = 1; lossesA++; winsB++; }
+          else if (g2 === 'draw') { drawsA++; drawsB++; }
+
+          eloA = Math.round(eloA + K * (S_A - E_A));
+          eloB = Math.round(eloB + K * (S_B - E_B));
+        }
+
+        // Update database records
+        await db.players.update(pA._id, {
+          elo: eloA,
+          wins: (pA.wins || 0) + winsA,
+          losses: (pA.losses || 0) + lossesA,
+          draws: (pA.draws || 0) + drawsA,
+        });
+
+        await db.players.update(pB._id, {
+          elo: eloB,
+          wins: (pB.wins || 0) + winsB,
+          losses: (pB.losses || 0) + lossesB,
+          draws: (pB.draws || 0) + drawsB,
+        });
+      }
+      updates.eloProcessed = true;
     }
 
-    const updatedMatch = await db.matches.updateBoard(req.params.id, Number(boardNumber), playerAId, playerBId, result);
-    if (!updatedMatch) return res.status(404).json({ error: "Match or board not found" });
+    const updatedMatch = await db.matches.update(req.params.id, updates);
+
+    await recalculateTeamStandings();
+    const allTeams = await db.teams.getAll();
+    socket.broadcast("SCOREBOARD_UPDATE", {
+      match: updatedMatch,
+      standings: allTeams
+    });
 
     res.json(updatedMatch);
   } catch (err) {
@@ -334,133 +556,20 @@ router.put('/matches/:id/boards', authenticateToken, requireAdmin, async (req, r
   }
 });
 
-router.post('/matches/:id/complete', authenticateToken, requireAdmin, async (req, res) => {
+router.delete('/matches/:id', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const { mvpPlayerId } = req.body;
     const match = await db.matches.getById(req.params.id);
     if (!match) return res.status(404).json({ error: "Match not found" });
-    if (match.isCompleted) return res.status(400).json({ error: "Match already completed" });
 
-    // 1. Calculate board scores and updates player stats/Elo
-    let teamAScore = 0;
-    let teamBScore = 0;
-    const K = 32;
+    await db.matches.delete(req.params.id);
 
-    // Use sequential for...of to correctly await database calls inside loops
-    for (const board of match.boards) {
-      const pA = await db.players.getById(board.playerAId);
-      const pB = await db.players.getById(board.playerBId);
-
-      if (!pA || !pB || !board.result) continue; // Skip if incomplete board
-
-      // Elo Calculations
-      const R_A = pA.elo;
-      const R_B = pB.elo;
-      const E_A = 1 / (1 + Math.pow(10, (R_B - R_A) / 400));
-      const E_B = 1 / (1 + Math.pow(10, (R_A - R_B) / 400));
-
-      let S_A = 0.5;
-      let S_B = 0.5;
-
-      if (board.result === '1-0') {
-        S_A = 1; S_B = 0;
-        teamAScore += 1;
-      } else if (board.result === '0-1') {
-        S_A = 0; S_B = 1;
-        teamBScore += 1;
-      } else if (board.result === '0.5-0.5') {
-        teamAScore += 0.5;
-        teamBScore += 0.5;
-      }
-
-      // New Elo
-      const newEloA = Math.round(R_A + K * (S_A - E_A));
-      const newEloB = Math.round(R_B + K * (S_B - E_B));
-
-      // Update Player A
-      await db.players.update(pA._id, {
-        elo: newEloA,
-        wins: (pA.wins || 0) + (S_A === 1 ? 1 : 0),
-        losses: (pA.losses || 0) + (S_A === 0 ? 1 : 0),
-        draws: (pA.draws || 0) + (S_A === 0.5 ? 1 : 0),
-      });
-
-      // Update Player B
-      await db.players.update(pB._id, {
-        elo: newEloB,
-        wins: (pB.wins || 0) + (S_B === 1 ? 1 : 0),
-        losses: (pB.losses || 0) + (S_B === 0 ? 1 : 0),
-        draws: (pB.draws || 0) + (S_B === 0.5 ? 1 : 0),
-      });
-    }
-
-    // Award MVP point
-    if (mvpPlayerId) {
-      const mvpPlayer = await db.players.getById(mvpPlayerId);
-      if (mvpPlayer) {
-        await db.players.update(mvpPlayerId, { mvps: (mvpPlayer.mvps || 0) + 1 });
-      }
-    }
-
-    // Determine winning team
-    let winnerTeamId = null;
-    const teamA = await db.teams.getById(match.teamAId);
-    const teamB = await db.teams.getById(match.teamBId);
-
-    if (teamA && teamB) {
-      if (teamAScore > teamBScore) {
-        winnerTeamId = teamA._id.toString();
-        await db.teams.update(teamA._id, {
-          points: teamA.points + 3, // 3 points for win
-          wins: teamA.wins + 1,
-          boardPoints: teamA.boardPoints + teamAScore
-        });
-        await db.teams.update(teamB._id, {
-          losses: teamB.losses + 1,
-          boardPoints: teamB.boardPoints + teamBScore
-        });
-      } else if (teamBScore > teamAScore) {
-        winnerTeamId = teamB._id.toString();
-        await db.teams.update(teamB._id, {
-          points: teamB.points + 3,
-          wins: teamB.wins + 1,
-          boardPoints: teamB.boardPoints + teamBScore
-        });
-        await db.teams.update(teamA._id, {
-          losses: teamA.losses + 1,
-          boardPoints: teamA.boardPoints + teamAScore
-        });
-      } else {
-        winnerTeamId = 'draw';
-        await db.teams.update(teamA._id, {
-          points: teamA.points + 1, // 1 point for draw
-          draws: teamA.draws + 1,
-          boardPoints: teamA.boardPoints + teamAScore
-        });
-        await db.teams.update(teamB._id, {
-          points: teamB.points + 1,
-          draws: teamB.draws + 1,
-          boardPoints: teamB.boardPoints + teamBScore
-        });
-      }
-    }
-
-    // Complete match
-    const completed = await db.matches.completeMatch(match._id, mvpPlayerId, winnerTeamId);
+    await recalculateTeamStandings();
     const allTeams = await db.teams.getAll();
-
-    // Broadcast WebSocket update
     socket.broadcast("SCOREBOARD_UPDATE", {
-      match: completed,
       standings: allTeams
     });
 
-    res.json({
-      match: completed,
-      teamAScore,
-      teamBScore,
-      winnerTeamId
-    });
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

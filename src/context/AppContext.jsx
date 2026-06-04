@@ -293,30 +293,28 @@ export const AppProvider = ({ children }) => {
   };
 
   // Match Operations
-  const updateMatchBoard = async (matchId, boardNumber, playerAId, playerBId, result) => {
-    const res = await fetch(`/api/matches/${matchId}/boards`, {
+  const updateMatch = async (id, matchData) => {
+    const res = await fetch(`/api/matches/${id}`, {
       method: 'PUT',
       headers: getHeaders(),
-      body: JSON.stringify({ boardNumber, playerAId, playerBId, result })
+      body: JSON.stringify(matchData)
     });
-    const updatedMatch = await res.json();
-    if (!res.ok) throw new Error(updatedMatch.error || "Failed to save board score");
-    setMatches(prev => prev.map(m => m.id === matchId ? updatedMatch : m));
-    return updatedMatch;
+    const updated = await res.json();
+    if (!res.ok) throw new Error(updated.error || "Failed to update match");
+    await fetchAllData();
+    return updated;
   };
 
-  const completeMatch = async (matchId, mvpPlayerId) => {
-    const res = await fetch(`/api/matches/${matchId}/complete`, {
-      method: 'POST',
-      headers: getHeaders(),
-      body: JSON.stringify({ mvpPlayerId })
+  const deleteMatch = async (id) => {
+    const res = await fetch(`/api/matches/${id}`, {
+      method: 'DELETE',
+      headers: getHeaders()
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Failed to complete match");
-    
-    // Explicitly refresh all data immediately on successful complete
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || "Failed to delete match");
+    }
     await fetchAllData();
-    return data;
   };
 
   const addMatch = async (matchData) => {
@@ -328,6 +326,7 @@ export const AppProvider = ({ children }) => {
     const newMatch = await res.json();
     if (!res.ok) throw new Error(newMatch.error || "Failed to create match");
     setMatches(prev => [...prev, newMatch]);
+    await fetchAllData();
     return newMatch;
   };
 
@@ -384,9 +383,9 @@ export const AppProvider = ({ children }) => {
     deleteTeam,
     addTournament,
     deleteTournament,
-    updateMatchBoard,
+    updateMatch,
     addMatch,
-    completeMatch,
+    deleteMatch,
     startAuction,
     placeBid,
     completeAuction,

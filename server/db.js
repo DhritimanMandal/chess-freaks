@@ -51,7 +51,7 @@ const PlayerSchema = new Schema({
 
 const TournamentSchema = new Schema({
   name: { type: String, required: true },
-  format: { type: String, required: true, enum: ['Round Robin', 'League Format', 'Swiss System', 'Knockout', 'Long Format'] },
+  format: { type: String, required: true, enum: ['Round Robin', 'League Format', 'Swiss System', 'Knockout', 'Long Format', 'Team VS Team'] },
   startDate: { type: String },
   endDate: { type: String },
   teams: [{ type: Schema.Types.ObjectId, ref: 'Team' }],
@@ -63,16 +63,16 @@ const MatchSchema = new Schema({
   teamAId: { type: Schema.Types.ObjectId, ref: 'Team', required: true },
   teamBId: { type: Schema.Types.ObjectId, ref: 'Team', required: true },
   round: { type: Number, required: true },
-  stage: { type: String },
-  boards: [{
-    boardNumber: Number,
-    playerAId: { type: Schema.Types.ObjectId, ref: 'Player' },
-    playerBId: { type: Schema.Types.ObjectId, ref: 'Player' },
-    result: { type: String, enum: ['1-0', '0-1', '0.5-0.5', null], default: null }
-  }],
-  winnerTeamId: { type: String, default: null }, // 'draw' or ObjectId String
-  mvpPlayerId: { type: Schema.Types.ObjectId, ref: 'Player', default: null },
+  matchNumber: { type: Number, required: true },
+  timeControl: { type: String, default: '10+6' },
+  variant: { type: String, default: 'Standard' },
+  matchLink: { type: String, default: '' },
+  playerAId: { type: Schema.Types.ObjectId, ref: 'Player', required: true },
+  playerBId: { type: Schema.Types.ObjectId, ref: 'Player', required: true },
+  game1Result: { type: String, enum: ['playerA', 'playerB', 'draw', 'NP', null], default: null },
+  game2Result: { type: String, enum: ['playerA', 'playerB', 'draw', 'NP', null], default: null },
   isCompleted: { type: Boolean, default: false },
+  eloProcessed: { type: Boolean, default: false },
   date: { type: String }
 }, schemaOptions);
 
@@ -211,41 +211,17 @@ const dbClient = {
     getAll: () => Match.find({}),
     getByTournament: (tourId) => Match.find({ tournamentId: tourId }),
     getById: (id) => Match.findById(id),
-    createMany: async (matchList) => {
-      const docs = matchList.map(m => ({
-        winnerTeamId: null,
-        mvpPlayerId: null,
-        isCompleted: false,
-        boards: Array.from({ length: 4 }, (_, i) => ({
-          boardNumber: i + 1,
-          playerAId: null,
-          playerBId: null,
-          result: null
-        })),
-        ...m
-      }));
-      return Match.insertMany(docs);
+    create: async (matchData) => {
+      const m = new Match(matchData);
+      await m.save();
+      return m;
     },
-    updateBoard: async (matchId, boardNumber, playerAId, playerBId, result) => {
-      const match = await Match.findById(matchId);
-      if (!match) return null;
-      
-      const board = match.boards.find(b => b.boardNumber === boardNumber);
-      if (board) {
-        board.playerAId = playerAId;
-        board.playerBId = playerBId;
-        board.result = result;
-        await match.save();
-        return match;
-      }
-      return null;
+    update: async (id, updates) => {
+      return Match.findByIdAndUpdate(id, updates, { new: true });
     },
-    completeMatch: async (matchId, mvpPlayerId, winnerTeamId) => {
-      return Match.findByIdAndUpdate(matchId, {
-        isCompleted: true,
-        mvpPlayerId: mvpPlayerId || null,
-        winnerTeamId: winnerTeamId || null
-      }, { new: true });
+    delete: async (id) => {
+      await Match.findByIdAndDelete(id);
+      return true;
     },
     deleteByTournament: async (tourId) => {
       await Match.deleteMany({ tournamentId: tourId });
